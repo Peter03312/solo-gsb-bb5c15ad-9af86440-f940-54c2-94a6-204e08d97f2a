@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="考古地层关系核验服务",
-    version="1.15.0",
+    version="1.15.1",
     description=(
         "登记遗址地层与带唯一证据编号的“同一期 / 早于”断言；"
         "同一期可传递，早于沿同一期与早于路径推导；"
@@ -416,6 +416,7 @@ def post_retraction_analysis(body: ResilienceIn):
     - 受保护证据单独仍支撑某条路径（替代证据路径仍成立）：status=unreachable，
       minimum_retraction_count 为 null，附仍成立的证据路径 remaining_evidence_path；
     - 否则 status=retractions_found，给出最少撤回集合，模拟后关系恒为未定。
+      最小割阻塞流为显式栈迭代，约千条连续证据的合法长链不再递归过深；
     - 修订号过期 409 STALE_REVISION、地层未登记 400 INVALID_STRATUM、
       两层相同 400 DUPLICATE_STRATUM、受保护证据不存在或非生效
       400 INVALID_PROTECTED_EVIDENCE。

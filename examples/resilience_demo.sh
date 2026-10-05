@@ -117,13 +117,55 @@ curl -s -X POST "$BASE/resilience/retraction-analysis" -H 'Content-Type: applica
   "stratum_b": "T4",
   "protected_evidence": ["RV-404"]}' | pp
 
-echo; echo "== 10. 确认分析全程只读：修订号仍为 $REV，无新增断言 =="
-curl -s "$BASE/revision" | pp
-curl -s "$BASE/assertions?status=active" | python3 -c '
+echo; echo "== 10. 长链修复：约千级连续“早于”证据不再递归过深（HTTP 200，返回撤回建议） =="
+# 分两批各 300 条登记 600 条连续早于证据 LC-E00000..LC-E00599：LC0 < LC1 < ... < LC600。
+# 600 已远超修复前递归 DFS 的栈深上限（旧实现下此类合法长链直接 HTTP 500）；
+# 证据编号带 LC- 前缀，重跑本脚本不会与上面的 RV-* 冲突。
+LONG_N=600
+LONG_HALF=300
+LONG_REV="$(curl -s "$BASE/revision" | python3 -c 'import sys,json;print(json.load(sys.stdin)["revision"])')"
+HAVE_LONG="$(curl -s "$BASE/assertions?status=active" \
+  | python3 -c 'import sys,json;print(1 if any(r["evidence_id"]=="LC-E00000" for r in json.load(sys.stdin)) else 0)')"
+if [ "$HAVE_LONG" = 0 ]; then
+  for s in $(seq 0 "$LONG_N"); do
+    curl -s -X POST "$BASE/strata" -H 'Content-Type: application/json' \
+      -d "{\"stratum_id\": \"LC$s\", \"site\": \"撤回承受力长链区\"}" >/dev/null
+  done
+  OPS1="$(LONG_REV="$LONG_REV" python3 -c '
+import json, os
+rev=int(os.environ["LONG_REV"])
+ops=[{"op":"assert","evidence_id":f"LC-E{i:05d}","stratum_a":f"LC{i}","stratum_b":f"LC{i+1}",
+      "relation":"earlier_than"} for i in range(300)]
+print(json.dumps({"expected_revision":rev,"operations":ops}))')"
+  R1="$(curl -s -X POST "$BASE/batches" -H 'Content-Type: application/json' -d "$OPS1" \
+       | python3 -c 'import sys,json;print(json.load(sys.stdin)["revision"])')"
+  OPS2="$(R1="$R1" python3 -c '
+import json, os
+rev=int(os.environ["R1"])
+ops=[{"op":"assert","evidence_id":f"LC-E{i:05d}","stratum_a":f"LC{i}","stratum_b":f"LC{i+1}",
+      "relation":"earlier_than"} for i in range(300,600)]
+print(json.dumps({"expected_revision":rev,"operations":ops}))')"
+  curl -s -X POST "$BASE/batches" -H 'Content-Type: application/json' -d "$OPS2" | pp
+fi
+LONG_REV="$(curl -s "$BASE/revision" | python3 -c 'import sys,json;print(json.load(sys.stdin)["revision"])')"
+echo "   当前修订号 $LONG_REV；分析 LC0 与 LC600（600 条连续早于证据构成的唯一长链）"
+curl -s -X POST "$BASE/resilience/retraction-analysis" -H 'Content-Type: application/json' -d "{
+  \"expected_revision\": $LONG_REV,
+  \"stratum_a\": \"LC0\",
+  \"stratum_b\": \"LC$LONG_N\",
+  \"protected_evidence\": []}" | python3 -c '
 import sys, json
-rows = json.load(sys.stdin)
-print("active assertions:", sorted(r["evidence_id"] for r in rows))
-assert all(r["evidence_id"].startswith("RV-") for r in rows)
-print("分析过程无写入（只读成立）")'
+b = json.load(sys.stdin)
+assert b["status"] == "retractions_found", b
+assert b["original_relation"] == "earlier_than"
+assert len(b["original_evidence_path"]) == 600
+assert b["minimum_retraction_count"] == 1
+assert b["suggested_retractions"] == ["LC-E00000"]
+assert b["simulated_relation"] == "undetermined"
+assert b["simulated_evidence_path"] == []
+print("   -> 最少撤回 1 条，建议 [LC-E00000]，模拟后未定；原最优路径 600 步（修复前此处 HTTP 500）")'
+
+echo; echo "== 11. 确认分析全程只读：修订号仍为 $LONG_REV（分析不产生修订） =="
+curl -s "$BASE/revision" | pp
 
 echo; echo "全部撤回承受力示例执行完毕（正式状态未被分析修改）。"

@@ -83,6 +83,9 @@
   原最优证据路径、建议撤回编号与模拟撤回后的关系：
   - 关系由“同一期（无向）+ 早于（有向）”混合图上的路径支撑，撤回只删边；使关系变未定 ⇔
     切断支撑该关系的**全部**路径（最少撤回数即混合证据图上的 s–t 最小割）；
+  - **长链不报错**：约千条连续“早于 / 同一期”证据构成的合法长链上，最小割阻塞流
+    全程用显式栈迭代搜索（不再递归），并一次构建网络骨架、复用容量做字典序选解，
+    复核人员始终能拿到撤回建议；
   - **同一期双向连通按一条证据撤回计数**（无向边割值为 1）；
   - **替代证据路径仍成立时不判失效**：若受保护证据单独仍支撑某条路径，返回
     `status=unreachable`、`minimum_retraction_count=null` 与仍成立的（字典序最小）证据路径
@@ -923,6 +926,36 @@ python3 tests/test_snapshot_membership_point_in_time.py
 （400 `INVALID_STRATUM`）、两层相同（400 `DUPLICATE_STRATUM`）、受保护证据不存在或非生效
 （400 `INVALID_PROTECTED_EVIDENCE`，`details.not_found` / `details.not_active`）。
 分析在 `REPEATABLE READ READ ONLY` 快照事务内完成，**不改断言、修订或变化记录**。
+
+**长链修复（本轮）**：修复前，约千条连续“早于”证据构成的合法长链会让最小割搜索的
+递归 DFS 递归过深（HTTP 500，复核人员拿不到建议）。修复后阻塞流改为**显式栈迭代**
+（调用栈不随链深增长），网络骨架只构建一次、字典序贪心的可行性测试只重置容量并
+按需提前截断流量，因此千条 / 数千条连续证据链均在亚秒级返回：
+
+```bash
+# 视图含约千级连续“早于”证据 LC-E00000..LC-E00999：LC0 < LC1 < ... < LC1000
+curl -s -X POST "$BASE/resilience/retraction-analysis" -H 'Content-Type: application/json' -d '{
+  "expected_revision": 1,
+  "stratum_a": "LC0",
+  "stratum_b": "LC1000",
+  "protected_evidence": []
+}'
+# -> 200（修复前为 500）
+# {
+#   "status": "retractions_found",
+#   "original_relation": "earlier_than",
+#   "original_evidence_path": ["LC-E00000", ..., "LC-E00999"],   // 1000 步
+#   "minimum_retraction_count": 1,                               // 唯一链上任撤一条
+#   "suggested_retractions": ["LC-E00000"],                      // 并列取字典序最小
+#   "simulated_relation": "undetermined",                        // 模拟撤回后恒为未定
+#   "simulated_evidence_path": []
+# }
+```
+
+反向查询（`stratum_a=LC1000`、`stratum_b=LC0`）自动规整 `later_than` 方向，结果相同；
+千条连续“同一期”链同样按**一条证据**计数（最小割 1）；受保护证据若自身仍支撑整条
+长链，照旧返回 `status=unreachable` 与 1000 步的 `remaining_evidence_path`。请求字段、
+响应字段与既有错误约定均未改变。
 
 ```bash
 bash examples/resilience_demo.sh
