@@ -14,9 +14,10 @@
   全部混合路径被切断）；
 - **同一期双向连通按一条证据撤回计数**：混合图中的同一期边是无向边，网络上
   建成正反两条容量 1 的弧，同一期证据的最小割恰为 1；
-- 最少撤回数即该混合证据图上的 s–t 最小割（Dinic 单位容量）；并列时按证据
-  编号序列字典序最小，通过对证据按编号排序后的逐条“强制保留 / 强制删去”
-  可行性测试贪心求得；
+- 最少撤回数即该混合证据图上的 s–t 最小割（Dinic 单位容量，阻塞流为显式栈
+  迭代实现：约千条连续“早于”证据构成的长链上不受 Python 递归深度限制）；
+  并列时按证据编号序列字典序最小，通过对证据按编号排序后的逐条“强制保留 /
+  强制删去”可行性测试贪心求得（撤回集合已满即提前结束，结果不变）；
 - 替代证据路径仍成立时不判失效：最小割必须切断全部路径，若受保护证据单独
   仍支撑某条路径（受保护子图仍连通），目标不可达，明确返回 `unreachable`
   并给出仍成立的（字典序最小）证据路径；
@@ -82,17 +83,41 @@ class _Dinic:
         return level[t] >= 0
 
     def _dfs(self, v: int, t: int, f: int, level: List[int], it: List[int]) -> int:
-        if v == t:
-            return f
-        while it[v] < len(self.g[v]):
-            e = self.g[v][it[v]]
-            if e.cap > 0 and level[e.to] == level[v] + 1:
-                d = self._dfs(e.to, t, min(f, e.cap), level, it)
-                if d > 0:
+        """在层次图上找一条 v→t 增广路，推送瓶颈流量并返回；无路返回 0。
+
+        显式栈迭代实现，语义与递归版完全一致（当前弧优化、每次调用只增广
+        一条路径）：约千条连续“早于”证据构成的长链上递归版会超出 Python
+        递归深度限制而报服务错误，迭代版不受链长限制。
+        """
+        stack_nodes = [v]
+        stack_edges: List[_Edge] = []  # stack_edges[i]: stack_nodes[i] -> stack_nodes[i+1]
+        while stack_nodes:
+            node = stack_nodes[-1]
+            if node == t:
+                d = f
+                for e in stack_edges:
+                    if e.cap < d:
+                        d = e.cap
+                for e in stack_edges:
                     e.cap -= d
                     self.g[e.to][e.rev].cap += d
-                    return d
-            it[v] += 1
+                return d
+            advanced = False
+            while it[node] < len(self.g[node]):
+                e = self.g[node][it[node]]
+                if e.cap > 0 and level[e.to] == level[node] + 1:
+                    stack_edges.append(e)
+                    stack_nodes.append(e.to)
+                    advanced = True
+                    break
+                it[node] += 1
+            if not advanced:
+                # 死路：回退到父节点，并跳过来到本节点的那条边（同递归版
+                # 子调用返回 0 后的 it[v] += 1）
+                stack_nodes.pop()
+                if stack_edges:
+                    stack_edges.pop()
+                    it[stack_nodes[-1]] += 1
         return 0
 
     def max_flow(self, s: int, t: int, limit: Optional[int] = None) -> int:
@@ -174,6 +199,10 @@ def _lexicographically_smallest_min_cut(
     cut: set = set()
 
     for eid in sorted(a.evidence_id for a in assertions if a.evidence_id not in protected):
+        if len(cut) == cut_size:
+            # 撤回集合已满：剩余预算为 0，可行性条件 val <= -1 恒不成立，
+            # 其余证据必然全部保留，提前结束（长链上避免近千次冗余最大流）。
+            break
         val = _min_cut_value(
             assertions,
             source,

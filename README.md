@@ -89,6 +89,9 @@
     `remaining_evidence_path`；
   - 原关系未定时返回 `status=already_undetermined`、撤回数 `0`、空集合；成功找到时
     `status=retractions_found`，模拟后关系恒为 `undetermined`；
+  - 最小割搜索（Dinic 阻塞流）为**显式栈迭代实现**：约千条连续“早于”证据构成的
+    合法长链也能正常给出建议，不再因递归深度超限报服务错误；字典序贪心在撤回集合
+    确定后提前结束，长链分析保持秒级以内响应；
   - 修订号过期（409 `STALE_REVISION`）、地层未登记（400 `INVALID_STRATUM`）、两层相同
     （400 `DUPLICATE_STRATUM`）、受保护证据不存在或非生效
     （400 `INVALID_PROTECTED_EVIDENCE`，`details` 区分 `not_found` / `not_active`）明确拒绝；
@@ -299,7 +302,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | GET | `/assertions?status=active` | 断言列表 |
 | GET | `/revision-changes?limit=100&cursor=...` | 游标分页追踪各正式修订前后关系/最优路径变化 |
 | GET | `/relationship?a=L1&b=L3` | 查询两地层当前关系及支撑证据路径 |
-| POST | `/resilience/retraction-analysis` | 只读证据撤回承受力分析：求让指定两层关系变为未定的最少生效证据撤回（含受保护证据集合） |
+| POST | `/resilience/retraction-analysis` | 只读证据撤回承受力分析：求让指定两层关系变为未定的最少生效证据撤回（含受保护证据集合；约千条连续“早于”证据长链亦可正常分析） |
 | GET | `/periodization?expected_revision=1` | 只读分期骨架：同一期等价组 + 组间传递约简后的直接早于边（含孤立地层） |
 | POST | `/periodization/arrangement` | 正式视图只读分期试排：总期数 1～64 + 期位锚点，返回每组在所有可行排布中的最早/最晚期位 |
 | POST | `/projections/{id}/periodization/arrangement` | 推演冻结视图（含已关闭）只读分期试排，返回结构同正式 |
@@ -926,6 +929,42 @@ python3 tests/test_snapshot_membership_point_in_time.py
 
 ```bash
 bash examples/resilience_demo.sh
+```
+
+**长链用法（本轮修复）**：约千条连续“早于”证据构成的合法长链上，修复前最小割
+搜索因递归过深报服务错误（HTTP 500），复核人员拿不到撤回建议；修复后阻塞流改为
+显式栈迭代（语义不变），同一请求原一般数十毫秒内返回。请求与响应字段完全不变：
+
+```bash
+# 设 C0000 < C0001 < ... < C1000 为 1000 条连续“早于”证据（LC-0000..LC-0999）构成的长链
+curl -s -X POST "$BASE/resilience/retraction-analysis" -H 'Content-Type: application/json' -d '{
+  "expected_revision": 1,
+  "stratum_a": "C0000",
+  "stratum_b": "C1000",
+  "protected_evidence": []
+}'
+```
+
+```json
+{
+  "status": "retractions_found",
+  "original_relation": "earlier_than",
+  "original_evidence_path": ["LC-0000", "LC-0001", "…共 1000 条…", "LC-0999"],
+  "minimum_retraction_count": 1,
+  "suggested_retractions": ["LC-0000"],
+  "simulated_relation": "undetermined"
+}
+```
+
+链上任撤一条即未定，并列时取证据编号序列字典序最小的一组（`[LC-0000]`）；
+保护链首若干条后建议自动顺延到其后最小编号（受保护证据不进入建议）；
+整条链受保护时返回 `status=unreachable` 与仍成立的 1000 条剩余路径。
+完整演示（含 SQL 直插演示数据、受保护顺延、全链受保护、反向查询、只读校验与清理）：
+
+```bash
+bash examples/resilience_long_chain_demo.sh
+# 自动化等价回归（内存假连接，无需数据库；含 1200/1500 条长链在默认递归上限下的用例）：
+python3 tests/test_resilience_retraction_analysis.py
 ```
 
 ### 分期骨架视图：`GET /periodization`（只读）
@@ -1614,6 +1653,13 @@ bash examples/preflight_demo.sh
 bash examples/resilience_demo.sh
 ```
 
+长链撤回承受力演示（约千条连续“早于”证据链上最小割正常返回、受保护证据顺延与
+全链受保护不可达、反向查询方向规整、全程只读；SQL 直插演示数据，结束自动清理）：
+
+```bash
+bash examples/resilience_long_chain_demo.sh
+```
+
 推演（沙盘）端到端演示（创建固定基线、推演批次、关系查询、并入成功与三类并入失败、
 净变更为空只关闭、放弃推演）：
 
@@ -1708,6 +1754,7 @@ examples/
   arrangement_demo.sh # 分期试排示例（最早/最晚界、锚点、三类不可行证据链、推演冻结视图）
   preflight_demo.sh # 提交前只读预检示例（最少撤回/预算不足/新断言自相矛盾/拒绝/保全联动：EVIDENCE_HELD 与建议排除受保全证据/只读校验）
   resilience_demo.sh # 撤回承受力分析示例（最小割/字典序最小/受保护不可达/原关系未定/拒绝）
+  resilience_long_chain_demo.sh # 长链撤回承受力示例（约千条连续“早于”证据链/受保护顺延/全链保护不可达/只读校验）
   projection_demo.sh # 推演端到端示例（沙盘批次、并入成功与三类失败、空净变更）
   changes_demo.sh  # 修订变化追踪示例（变化/路径改变/失败批次/并入/游标分页）
   revision_changes_backfill_demo.sh # 封口/待补交错启动回填修复核查（撤回不漏记/首次偏离/重启幂等）
@@ -1721,6 +1768,7 @@ tests/
   test_relation_diffs_equivalence.py # 变化追踪候选精算 vs 全库逐对口径等价性（纯函数，无需数据库）
   test_revision_changes_backfill.py  # 启动回填前态修复回归（真实 PostgreSQL：封口/待补交错撤回、首次偏离复核、零变化封口、重复启动幂等、回填与在线提交交错/持锁等待）
   test_preflight_holds.py            # 预检与临时保全联动回归：EVIDENCE_HELD 同构拒绝、受保全证据排除、解除恢复（内存假连接，无需数据库）
+  test_resilience_retraction_analysis.py # 撤回承受力分析回归：约千条长链默认递归上限下正常返回、同一期按一条计数、受保护不进建议/不可达、未定零撤回、错误约定（内存假连接，无需数据库）
   test_relationship_view_consistency.py # 两类关系查询同视图回归（内存假连接：注入并发提交，断言修订号/结论/路径明细不混版）
   test_relationship_view_consistency_e2e.py # 同上的真实 PostgreSQL 端到端验证（语句门闩确定性交错 + 多线程压力）
   test_snapshot_relationship_frozen_detail.py # 历史定版查询冻结明细回归（内存假连接：撤回后明细保持封存口径/与成果包同源/正式查询仍现态）
